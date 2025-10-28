@@ -9,3 +9,6 @@ tensorboard/
 joblog/
 archived/
 
+# training videos
+training_videos/
+*.mp4
