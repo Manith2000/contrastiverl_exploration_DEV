@@ -8,6 +8,8 @@ Run using multi-threading
 
 import functools
 from typing import Any, Dict
+import atexit
+import signal
 
 from absl import app
 from absl import flags
@@ -16,6 +18,17 @@ from contrastive import utils as contrastive_utils
 import launchpad as lp
 import numpy as np
 import os
+
+try:
+    from contrastive.wandb_logger import finish_wandb
+
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
+    def finish_wandb():
+        pass
+
 
 FLAGS = flags.FLAGS
 
@@ -36,6 +49,18 @@ flags.DEFINE_bool(
     "sample_goals",
     False,
     "sample the goal position uniformly according to the environment (corresponds to the original contrastive_rl algorithm)",
+)
+
+# Wandb flags
+flags.DEFINE_bool("use_wandb", True, "Whether to use Weights & Biases for logging")
+flags.DEFINE_string("wandb_project", "contrastive-rl", "Wandb project name")
+flags.DEFINE_string("wandb_entity", None, "Wandb entity (username or team name)")
+flags.DEFINE_string("wandb_group", None, "Wandb group for organizing runs")
+flags.DEFINE_string(
+    "wandb_name", None, "Wandb run name (if None, wandb will auto-generate)"
+)
+flags.DEFINE_string(
+    "wandb_mode", "online", "Wandb mode: 'online', 'offline', or 'disabled'"
 )
 
 # fixed goal coordinates for supported environments
@@ -176,6 +201,34 @@ def main(_):
     params["log_dir"] = FLAGS.log_dir_path
     params["time_delta_minutes"] = FLAGS.time_delta_minutes
 
+    # Wandb parameters
+    params["use_wandb"] = FLAGS.use_wandb
+    params["wandb_project"] = FLAGS.wandb_project
+    params["wandb_entity"] = FLAGS.wandb_entity
+    params["wandb_group"] = FLAGS.wandb_group
+    params["wandb_mode"] = FLAGS.wandb_mode
+
+    # Set wandb run name if not provided
+    if FLAGS.wandb_name:
+        params["wandb_name"] = FLAGS.wandb_name
+    else:
+        # Auto-generate name based on alg, env, and seed
+        params["wandb_name"] = f"{alg}_{env_name}_seed{seed_idx}"
+
+    # Add tags for easy filtering
+    params["wandb_tags"] = [alg, env_name, f"seed_{seed_idx}"]
+
+    # Add notes
+    params["wandb_notes"] = f"Contrastive RL experiment: {alg} on {env_name}"
+
+    print(f"Wandb logging: {'enabled' if FLAGS.use_wandb else 'disabled'}")
+    if FLAGS.use_wandb:
+        print(f"  Project: {FLAGS.wandb_project}")
+        print(f"  Entity: {FLAGS.wandb_entity}")
+        print(f"  Group: {FLAGS.wandb_group}")
+        print(f"  Run name: {params['wandb_name']}")
+        print(f"  Mode: {FLAGS.wandb_mode}")
+
     if alg == "contrastive_cpc":
         params["use_cpc"] = True
     elif alg == "c_learning":
@@ -193,7 +246,26 @@ def main(_):
 
     print(params)
 
-    lp.launch(program, terminal="current_terminal")
+    # Register cleanup handlers for wandb
+    if FLAGS.use_wandb and WANDB_AVAILABLE:
+        # Register cleanup on normal exit
+        atexit.register(finish_wandb)
+
+        # Register cleanup on interrupt (Ctrl+C)
+        def signal_handler(signum, frame):
+            print("\nInterrupted! Cleaning up wandb...")
+            finish_wandb()
+            exit(0)
+
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+
+    try:
+        lp.launch(program, terminal="current_terminal")
+    finally:
+        # Ensure wandb is finished even if launch fails
+        if FLAGS.use_wandb and WANDB_AVAILABLE:
+            finish_wandb()
 
 
 if __name__ == "__main__":
